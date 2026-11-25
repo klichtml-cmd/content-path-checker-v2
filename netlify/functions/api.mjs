@@ -5,6 +5,7 @@
 //   courses/<lang>/<id>          JSON: course record (paths, file info, previous versions)
 //   meta/<lang>/<id>             JSON: same record WITHOUT the paths (small; used for the course list)
 //   files/<lang>/<id>/<stamp>    binary: original uploaded report file
+//   (<id> = course name in lower case, with unsafe characters such as "+" written as ~<hex>.)
 //   state                        JSON: { lastChange, lastBackup }
 //   languages                    JSON: [{ code, name }]  (English and Hindi by default)
 import { getStore } from "@netlify/blobs";
@@ -34,6 +35,9 @@ function passcode() {
   catch { return process.env.TEAM_PASSCODE || ""; }
 }
 const cleanId = s => String(s || "").trim().toLowerCase().slice(0, 200);
+// Storage keys: characters such as "+" are not stored reliably by Netlify Blobs ("+" can turn into a space),
+// so anything outside a safe set is written as ~<hex>. Names made only of safe characters keep the same key as before.
+const keyId = id => String(id).replace(/[^a-z0-9 \-_.()#,']/g, c => "~" + c.codePointAt(0).toString(16) + ".");
 const b64ToBytes = b64 => Uint8Array.from(Buffer.from(b64, "base64"));
 
 async function touch(s, extra = {}) {
@@ -67,13 +71,14 @@ async function saveCourse(s, lang, body, { keepHistory = true, importMode = fals
   const id = cleanId(body.name);
   if (!id) throw new Error("Course name is required.");
   if (!Array.isArray(body.entries)) throw new Error("Missing content paths.");
-  const key = `courses/${lang}/${id}`;
+  const kid = keyId(id);
+  const key = `courses/${lang}/${kid}`;
   const existing = await s.get(key, { type: "json" });
   const stamp = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
   let fileKey = null;
   if (body.fileB64) {
-    fileKey = `files/${lang}/${id}/${stamp}`;
+    fileKey = `files/${lang}/${kid}/${stamp}`;
     await s.set(fileKey, b64ToBytes(body.fileB64));
   }
 
@@ -83,7 +88,7 @@ async function saveCourse(s, lang, body, { keepHistory = true, importMode = fals
     for (const h of body.history || []) {
       let hk = null;
       if (h.fileB64) {
-        hk = `files/${lang}/${id}/${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+        hk = `files/${lang}/${kid}/${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
         await s.set(hk, b64ToBytes(h.fileB64));
       }
       history.push({ file: h.file, fileType: h.fileType || "", uploadedAt: h.uploadedAt, uploadedBy: h.uploadedBy || "", pathCount: h.pathCount || 0, fileKey: hk });
@@ -105,18 +110,22 @@ async function saveCourse(s, lang, body, { keepHistory = true, importMode = fals
     fileKey, history
   };
   await s.setJSON(key, rec);
-  await s.setJSON(`meta/${lang}/${id}`, toMeta(rec));
+  await s.setJSON(`meta/${lang}/${kid}`, toMeta(rec));
+  // read it back, so a save that did not stick is reported instead of silently lost
+  const check = await s.get(`meta/${lang}/${kid}`, { type: "json" });
+  if (!check || check.uploadedAt !== rec.uploadedAt) throw new Error("The course could not be stored. Please try again.");
   await touch(s);
   return { existed: !!existing, course: toMeta(rec) };
 }
 
 async function deleteCourse(s, lang, id) {
-  const key = `courses/${lang}/${id}`;
+  const kid = keyId(id);
+  const key = `courses/${lang}/${kid}`;
   const c = await s.get(key, { type: "json" });
   if (!c) return false;
   for (const k of [c.fileKey, ...(c.history || []).map(h => h.fileKey)]) if (k) await s.delete(k);
   await s.delete(key);
-  await s.delete(`meta/${lang}/${id}`);
+  await s.delete(`meta/${lang}/${kid}`);
   return true;
 }
 
@@ -195,7 +204,7 @@ export default async (req) => {
     // one full course, with all its content paths
     if (route === "course" && req.method === "GET") {
       if (!LANGS.includes(lang)) return err("Unknown category");
-      const c = await s.get(`courses/${lang}/${cleanId(url.searchParams.get("id"))}`, { type: "json" });
+      const c = await s.get(`courses/${lang}/${keyId(cleanId(url.searchParams.get("id")))}`, { type: "json" });
       if (!c) return err("Course not found", 404);
       return json(c);
     }
