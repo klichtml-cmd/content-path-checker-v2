@@ -721,15 +721,30 @@ async function runCheck(save){
       await Store.save(LANG, {name, file:currentFile, fileType:currentType, uploadedBy:uploader, entries,
         pathColumn: headers[+$('pathCol').value], titleColumn: +$('titleCol').value>=0 ? headers[+$('titleCol').value] : ''}, currentBuf);
       if(MODE==='shared' && currentBuf && (currentBuf.byteLength>MAX_ORIGINAL_BYTES || Store.lastSkippedFile)) notes.push(['bad','The file is larger than 3.5 MB, so only its content paths were saved, not the file itself.']);
-      toast(`“${name}” ${existing?'updated':'saved'}.`);
-      resetUpload();
+      // confirm with the server that the course is really stored
+      busy(true, 'Confirming…');
+      let after = [];
+      try{ after = await Store.list(LANG); }catch(e){}
+      const stored = after.find(c=>c.id===id);
+      if(stored){
+        notes.unshift(['ok', `✓ Saved in ${LANG_NAME[LANG]} courses as “${stored.name}”. ${after.length===1?'There is now 1 saved '+LANG_NAME[LANG]+' course.':'There are now '+after.length+' saved '+LANG_NAME[LANG]+' courses.'}`]);
+        toast(`“${name}” ${existing?'updated':'saved'}.`);
+        resetUpload();
+      }else{
+        notes.unshift(['bad', `✗ NOT SAVED: the server did not keep “${name}”. Please try “Check & save” again. If it keeps happening, send a screenshot of this message.`]);
+        alert(`“${name}” could not be saved. Please try again.`);
+      }
       renderLibrary();
     }else{
-      notes.push(['info','Only checked: this course was not saved.']);
+      notes.push(['bad','Only checked: this course was NOT saved. Use “Check & save” to add it to the list.']);
     }
     busy(false);
     showReport(lastReport, notes);
-  }catch(e){ busy(false); alert('Something went wrong: '+e.message); }
+  }catch(e){
+    busy(false);
+    alert((save?'Not saved. ':'')+'Something went wrong: '+e.message);
+    if(lastReport) showReport(lastReport, [['bad', `✗ ${save?'NOT SAVED. ':''}Error: ${e.message}`]]);
+  }
 }
 
 /* ========================= Showing results ========================= */
